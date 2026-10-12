@@ -73,3 +73,46 @@ def valid_auth_headers(test_user_id) -> dict:
         email="analyst@vigilx.com",
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+# -------------------------------------------------------------------------
+# Shared QA Candidate & Official Asset Fixtures
+# -------------------------------------------------------------------------
+from tests.fixtures.mock_candidates import (
+    CandidateThreat,
+    MockOfficialSocialAccount,
+    MockOfficialApp,
+    SYNTHETIC_BRAND_ID,
+    OFFICIAL_SOCIAL_ASSETS,
+    OFFICIAL_APP_ASSETS,
+    LEGITIMATE_OFFICIAL_CANDIDATES,
+    IMPOSTOR_CANDIDATES,
+    BOUNDARY_AND_MALFORMED_CANDIDATES,
+    ALL_TEST_CANDIDATES,
+)
+
+
+@pytest.fixture
+def mock_official_socials() -> list[MockOfficialSocialAccount]:
+    return OFFICIAL_SOCIAL_ASSETS
+
+
+@pytest.fixture
+def mock_official_apps() -> list[MockOfficialApp]:
+    return OFFICIAL_APP_ASSETS
+
+
+@pytest.fixture
+def legitimate_candidates() -> list[CandidateThreat]:
+    return LEGITIMATE_OFFICIAL_CANDIDATES
+
+
+@pytest.fixture
+def impostor_candidates() -> list[CandidateThreat]:
+    return IMPOSTOR_CANDIDATES
+
+
+@pytest.fixture
+def all_mock_candidates() -> list[CandidateThreat]:
+    return ALL_TEST_CANDIDATES
+
