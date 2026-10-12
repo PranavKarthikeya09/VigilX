@@ -1,0 +1,43 @@
+import os
+from typing import List
+from pydantic import computed_field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    PROJECT_NAME: str = "vigilX"
+    ENVIRONMENT: str = "development"
+    HOST: str = "0.0.0.0"
+    PORT: int = 8000
+
+    # Database
+    DATABASE_URL: str = "sqlite+aiosqlite:///./vigilx_dev.db"
+
+    # Supabase Auth
+    SUPABASE_URL: str = "https://placeholder.supabase.co"
+    SUPABASE_JWT_SECRET: str = "default-dev-jwt-secret-replace-in-production"
+    SUPABASE_JWKS_URL: str | None = None
+    SUPABASE_SERVICE_ROLE_KEY: str | None = None
+    SUPABASE_STORAGE_BUCKET: str = "brand-logos"
+
+    # CORS
+    CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
+
+    @computed_field
+    @property
+    def cors_origins_list(self) -> List[str]:
+        return [origin.strip() for origin in self.CORS_ORIGINS.split(",") if origin.strip()]
+
+    @computed_field
+    @property
+    def is_sqlite(self) -> bool:
+        return "sqlite" in self.DATABASE_URL.lower()
+
+
+settings = Settings()
