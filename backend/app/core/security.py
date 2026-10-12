@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict
 import jwt
+from jwt import PyJWKClient, PyJWK
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
@@ -13,40 +14,81 @@ from app.models.user import User
 
 security_scheme = HTTPBearer(auto_error=False)
 
+# In-memory cache for PyJWKClient instances by JWKS URL
+_jwks_client_cache: Dict[str, PyJWKClient] = {}
+
+
+def get_jwks_client(url: str) -> PyJWKClient:
+    """Retrieve or create a cached PyJWKClient instance."""
+    if url not in _jwks_client_cache:
+        _jwks_client_cache[url] = PyJWKClient(
+            url,
+            cache_jwk_set=True,
+            lifespan=3600,
+        )
+    return _jwks_client_cache[url]
+
 
 def verify_supabase_jwt(
     token: str,
-    secret: str | None = None,
+    public_key: Any = None,
+    jwks_url: str | None = None,
     expected_audience: str = "authenticated",
 ) -> Dict[str, Any]:
     """
-    Validate and decode a Supabase JWT token.
-    Enforces:
-    - Algorithm constraint: Strictly HS256 for symmetric key verification.
-    - Audience validation: Requires 'authenticated' (rejects 'anon' or missing aud).
-    - Expiration validation: Token must be within valid lifetime (exp).
-    - Subject validation: Must be present and formatted as a valid UUID (sub).
-    - Issuer validation: Verified if SUPABASE_URL is configured (non-placeholder).
+    Validate and decode a Supabase asymmetric JWT token (ECC P-256 / ES256).
+    
+    Security Controls:
+    1. Algorithm Allowlist: Only algorithms in settings.allowed_jwt_algorithms_list
+       (default: ['ES256']) are accepted.
+    2. No Fallback: Never falls back to HS256 or unverified decoding if verification fails.
+    3. Asymmetric Verification: Prefers JWKS key resolution or configured public key.
+    4. Audience Validation: Requires audience='authenticated'.
+    5. Expiration & Claims: Validates exp, sub (as valid UUID), and iss when configured.
     """
-    jwt_secret = secret or settings.SUPABASE_JWT_SECRET
-
     try:
-        # 1. Inspect unverified header to ensure valid algorithm
+        # 1. Inspect unverified header to validate algorithm allowlist and key ID
         unverified_header = jwt.get_unverified_header(token)
         alg = unverified_header.get("alg")
 
-        if alg != "HS256":
+        if not alg or alg not in settings.allowed_jwt_algorithms_list:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Invalid token algorithm: expected HS256, received {alg}",
+                detail=f"Unsupported or disallowed token algorithm: {alg}. Allowed: {settings.allowed_jwt_algorithms_list}",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # 2. Decode and verify signature, expiration, and required claims
+        # 2. Resolve verification key
+        verification_key = None
+
+        if public_key is not None:
+            verification_key = public_key
+        elif settings.SUPABASE_JWT_PUBLIC_KEY:
+            verification_key = settings.SUPABASE_JWT_PUBLIC_KEY
+        else:
+            resolved_url = jwks_url or settings.resolved_jwks_url
+            if resolved_url:
+                try:
+                    jwks_client = get_jwks_client(resolved_url)
+                    signing_key = jwks_client.get_signing_key_from_jwt(token)
+                    verification_key = signing_key.key
+                except Exception as e:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail=f"Unable to retrieve public signing key from JWKS: {str(e)}",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Authentication configuration error: No JWKS URL or public key configured for asymmetric JWT validation",
+                )
+
+        # 3. Decode and verify signature, expiration, and audience
         payload = jwt.decode(
             token,
-            jwt_secret,
-            algorithms=["HS256"],
+            verification_key,
+            algorithms=settings.allowed_jwt_algorithms_list,
             audience=expected_audience,
             options={
                 "verify_signature": True,
@@ -56,18 +98,18 @@ def verify_supabase_jwt(
             },
         )
 
-        # 3. Validate issuer if a real Supabase URL is configured
+        # 4. Validate issuer if configured with a real Supabase domain
         if settings.SUPABASE_URL and not settings.SUPABASE_URL.startswith("https://placeholder"):
             expected_issuer = f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1"
             token_issuer = payload.get("iss")
             if token_issuer and token_issuer.rstrip("/") != expected_issuer:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail=f"Token issuer mismatch",
+                    detail="Token issuer mismatch",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
-        # 4. Validate subject claim format (must be valid UUID)
+        # 5. Validate subject claim format (must be valid UUID)
         sub = payload.get("sub")
         if not sub:
             raise HTTPException(
@@ -87,6 +129,8 @@ def verify_supabase_jwt(
 
         return payload
 
+    except HTTPException:
+        raise
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -119,7 +163,7 @@ async def get_current_user(
 ) -> User:
     """
     FastAPI dependency:
-    1. Extracts and verifies Bearer token.
+    1. Extracts and verifies Bearer token using asymmetric verification.
     2. Synchronizes / JIT upserts Supabase Auth user identity to the application users table.
     3. Returns the local User ORM entity.
     """
@@ -154,31 +198,3 @@ async def get_current_user(
         await db.refresh(user)
 
     return user
-
-
-def create_test_jwt(
-    user_id: uuid.UUID,
-    email: str = "analyst@vigilx.com",
-    secret: str | None = None,
-    expires_in_seconds: int = 3600,
-    audience: str = "authenticated",
-    algorithm: str = "HS256",
-) -> str:
-    """
-    Generate a controlled synthetic test token for automated unit testing.
-    NOTE: This is strictly for test harnesses and must NEVER be treated as a production credential.
-    """
-    jwt_secret = secret or settings.SUPABASE_JWT_SECRET
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": str(user_id),
-        "email": email,
-        "aud": audience,
-        "role": "authenticated",
-        "iat": int(now.timestamp()),
-        "exp": int((now + timedelta(seconds=expires_in_seconds)).timestamp()),
-        "user_metadata": {
-            "full_name": "Test Analyst",
-        },
-    }
-    return jwt.encode(payload, jwt_secret, algorithm=algorithm)

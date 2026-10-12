@@ -1,17 +1,18 @@
 import uuid
-import pytest_asyncio
+from typing import Any
 import pytest
+import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
-from app.core.security import create_test_jwt
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import create_app
-
-# Controlled test secret strictly for automated tests
-TEST_JWT_SECRET = "super-secret-test-key-not-for-production-use"
+from tests.test_helpers import (
+    TEST_EC_PUBLIC_KEY_PEM,
+    create_test_es256_jwt,
+)
 
 # Isolated in-memory SQLite database for test suite
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
@@ -46,9 +47,9 @@ async def client(test_session):
 
     app.dependency_overrides[get_db] = override_get_db
 
-    # Temporarily point settings to TEST_JWT_SECRET
-    original_secret = settings.SUPABASE_JWT_SECRET
-    settings.SUPABASE_JWT_SECRET = TEST_JWT_SECRET
+    # Point public key to our test EC public key
+    original_public_key = settings.SUPABASE_JWT_PUBLIC_KEY
+    settings.SUPABASE_JWT_PUBLIC_KEY = TEST_EC_PUBLIC_KEY_PEM
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
@@ -56,7 +57,7 @@ async def client(test_session):
     ) as ac:
         yield ac
 
-    settings.SUPABASE_JWT_SECRET = original_secret
+    settings.SUPABASE_JWT_PUBLIC_KEY = original_public_key
     app.dependency_overrides.clear()
 
 
@@ -67,9 +68,8 @@ def test_user_id() -> uuid.UUID:
 
 @pytest.fixture
 def valid_auth_headers(test_user_id) -> dict:
-    token = create_test_jwt(
+    token = create_test_es256_jwt(
         user_id=test_user_id,
         email="analyst@vigilx.com",
-        secret=TEST_JWT_SECRET,
     )
     return {"Authorization": f"Bearer {token}"}
