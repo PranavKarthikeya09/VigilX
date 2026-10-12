@@ -20,7 +20,7 @@ if not settings.is_sqlite:
         "pool_pre_ping": True,
     })
 
-engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs)
+engine = create_async_engine(settings.async_database_url, **engine_kwargs)
 
 async_session_maker = async_sessionmaker(
     bind=engine,

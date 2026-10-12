@@ -49,6 +49,23 @@ async def test_auth_me_expired_token(client: AsyncClient, test_user_id: uuid.UUI
 
 
 @pytest.mark.asyncio
+async def test_auth_me_invalid_audience(client: AsyncClient, test_user_id: uuid.UUID):
+    """Token with anon audience or wrong audience must be rejected."""
+    anon_token = create_test_jwt(
+        user_id=test_user_id,
+        secret=TEST_JWT_SECRET,
+        audience="anon",
+    )
+    response = await client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {anon_token}"},
+    )
+    assert response.status_code == 401
+    data = response.json()
+    assert "audience" in data["message"].lower()
+
+
+@pytest.mark.asyncio
 async def test_auth_me_valid_token_and_jit_user_sync(client: AsyncClient, valid_auth_headers: dict, test_user_id: uuid.UUID):
     """Valid token succeeds and JIT synchronizes user into application table."""
     response = await client.get("/api/v1/auth/me", headers=valid_auth_headers)

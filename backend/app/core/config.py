@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
-    # Database
+    # Database: Supabase PostgreSQL URI (postgresql+asyncpg://...) or SQLite fallback
     DATABASE_URL: str = "sqlite+aiosqlite:///./vigilx_dev.db"
 
     # Supabase Auth
@@ -38,6 +38,21 @@ class Settings(BaseSettings):
     @property
     def is_sqlite(self) -> bool:
         return "sqlite" in self.DATABASE_URL.lower()
+
+    @computed_field
+    @property
+    def async_database_url(self) -> str:
+        """
+        Normalize PostgreSQL connection string for SQLAlchemy asyncpg driver.
+        Supabase often provides 'postgresql://...' or 'postgres://...', which must
+        be transformed to 'postgresql+asyncpg://...' for async SQLAlchemy execution.
+        """
+        url = self.DATABASE_URL
+        if url.startswith("postgres://"):
+            return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgresql://") and not url.startswith("postgresql+asyncpg://"):
+            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url
 
 
 settings = Settings()

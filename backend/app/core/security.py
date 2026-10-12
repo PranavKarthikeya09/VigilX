@@ -14,42 +14,60 @@ from app.models.user import User
 security_scheme = HTTPBearer(auto_error=False)
 
 
-def verify_supabase_jwt(token: str, secret: str | None = None) -> Dict[str, Any]:
+def verify_supabase_jwt(
+    token: str,
+    secret: str | None = None,
+    expected_audience: str = "authenticated",
+) -> Dict[str, Any]:
     """
     Validate and decode a Supabase JWT token.
-    Supports HS256 signature verification against the configured Supabase JWT secret.
-    Validates expiration, format, and subject claims.
+    Enforces:
+    - Algorithm constraint: Strictly HS256 for symmetric key verification.
+    - Audience validation: Requires 'authenticated' (rejects 'anon' or missing aud).
+    - Expiration validation: Token must be within valid lifetime (exp).
+    - Subject validation: Must be present and formatted as a valid UUID (sub).
+    - Issuer validation: Verified if SUPABASE_URL is configured (non-placeholder).
     """
     jwt_secret = secret or settings.SUPABASE_JWT_SECRET
 
     try:
-        # Decode without verification first to check header algorithm
+        # 1. Inspect unverified header to ensure valid algorithm
         unverified_header = jwt.get_unverified_header(token)
-        algorithm = unverified_header.get("alg", "HS256")
+        alg = unverified_header.get("alg")
 
-        # Supabase default is HS256; if RS256/ES256 is used, JWKS would be consulted
-        if algorithm not in ["HS256", "RS256", "ES256"]:
+        if alg != "HS256":
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Unsupported JWT signing algorithm: {algorithm}",
+                detail=f"Invalid token algorithm: expected HS256, received {alg}",
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        # In production Supabase HS256 mode:
+        # 2. Decode and verify signature, expiration, and required claims
         payload = jwt.decode(
             token,
             jwt_secret,
-            algorithms=[algorithm],
+            algorithms=["HS256"],
+            audience=expected_audience,
             options={
                 "verify_signature": True,
                 "verify_exp": True,
-                "require": ["sub", "exp"],
+                "verify_aud": True,
+                "require": ["sub", "exp", "aud"],
             },
-            # Allow 'authenticated' or unset audience per Supabase defaults
-            audience=["authenticated", "anon"] if "aud" in jwt.decode(token, options={"verify_signature": False}) else None,
         )
 
-        # Validate that subject is a valid UUID
+        # 3. Validate issuer if a real Supabase URL is configured
+        if settings.SUPABASE_URL and not settings.SUPABASE_URL.startswith("https://placeholder"):
+            expected_issuer = f"{settings.SUPABASE_URL.rstrip('/')}/auth/v1"
+            token_issuer = payload.get("iss")
+            if token_issuer and token_issuer.rstrip("/") != expected_issuer:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Token issuer mismatch",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+        # 4. Validate subject claim format (must be valid UUID)
         sub = payload.get("sub")
         if not sub:
             raise HTTPException(
@@ -73,6 +91,12 @@ def verify_supabase_jwt(token: str, secret: str | None = None) -> Dict[str, Any]
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token signature has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.InvalidAudienceError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token audience (must be 'authenticated')",
             headers={"WWW-Authenticate": "Bearer"},
         )
     except jwt.InvalidSignatureError:
@@ -134,10 +158,11 @@ async def get_current_user(
 
 def create_test_jwt(
     user_id: uuid.UUID,
-    email: str = "test@vigilx.local",
+    email: str = "analyst@vigilx.com",
     secret: str | None = None,
     expires_in_seconds: int = 3600,
     audience: str = "authenticated",
+    algorithm: str = "HS256",
 ) -> str:
     """
     Generate a controlled synthetic test token for automated unit testing.
@@ -156,4 +181,4 @@ def create_test_jwt(
             "full_name": "Test Analyst",
         },
     }
-    return jwt.encode(payload, jwt_secret, algorithm="HS256")
+    return jwt.encode(payload, jwt_secret, algorithm=algorithm)
