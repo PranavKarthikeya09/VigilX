@@ -20,30 +20,52 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
     )
 
-    # CORS Middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins_list,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
     # Request ID and Timing Middleware
     @app.middleware("http")
     async def request_middleware(request: Request, call_next):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            response = JSONResponse(
+                status_code=500,
+                headers={"X-Request-ID": request_id},
+                content={
+                    "status": 500,
+                    "error_code": "INTERNAL_SERVER_ERROR",
+                    "message": "Internal server error" if settings.ENVIRONMENT.lower() != "development" else str(exc),
+                    "details": [],
+                    "request_id": request_id,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+            )
         response.headers["X-Request-ID"] = request_id
         return response
+
+    # CORS Middleware — added after custom middlewares so that it wraps the
+    # entire application stack as the outermost ASGI layer. This ensures all
+    # responses (including errors, exceptions, and preflights) preserve CORS headers.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins_list,
+        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1):(5173|5174)$",
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Request-ID"],
+    )
 
     # Standardized Exception Handler
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+        headers = dict(exc.headers or {})
+        headers["X-Request-ID"] = request_id
         return JSONResponse(
             status_code=exc.status_code,
-            headers=exc.headers or {},
+            headers=headers,
             content={
                 "status": exc.status_code,
                 "error_code": "AUTHENTICATION_ERROR" if exc.status_code == 401 else "HTTP_ERROR",
