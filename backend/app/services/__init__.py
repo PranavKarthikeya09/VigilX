@@ -1,1 +1,1 @@
-"""VigilX services package."""
+"""vigilX Services Package (Detection, Similarity, Scoring & Exclusion)."""
